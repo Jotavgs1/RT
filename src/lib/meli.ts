@@ -12,6 +12,10 @@ function authHeaders() {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 export interface MeliItem {
   id: string;
   title: string;
@@ -33,6 +37,18 @@ export interface MeliProduct {
 
 export type ItemFetchResult =
   | { ok: true; data: MeliItem }
+  | { ok: false; errorCode: number | null; errorMessage: string };
+
+export type AlternativeSource = 'api_attributes' | 'api_batch' | 'api_search';
+
+export interface AlternativeRouteResult {
+  ok: true;
+  data: MeliItem;
+  source: AlternativeSource;
+}
+
+export type AlternativeRoutesResult =
+  | AlternativeRouteResult
   | { ok: false; errorCode: number | null; errorMessage: string };
 
 export function classifyAxiosError(err: unknown): { code: number | null; message: string } {
@@ -78,6 +94,149 @@ export async function fetchItem(itemId: string): Promise<ItemFetchResult> {
     console.error(`Error fetching item ${itemId}: HTTP ${code ?? 'unknown'} – ${message}`);
     return { ok: false, errorCode: code, errorMessage: message };
   }
+}
+
+/**
+ * Wraps fetchItem with exponential backoff + jitter for transient errors
+ * (429, 5xx, network timeout). Returns immediately for 4xx non-retryable codes.
+ * @param maxAttempts Maximum number of attempts (default: 3)
+ */
+export async function fetchItemWithRetry(
+  itemId: string,
+  maxAttempts = 3
+): Promise<ItemFetchResult & { attempts: number }> {
+  let lastResult: ItemFetchResult = { ok: false, errorCode: null, errorMessage: 'Not started' };
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    lastResult = await fetchItem(itemId);
+    if (lastResult.ok) return { ...lastResult, attempts: attempt };
+
+    const { errorCode } = lastResult;
+    // Only retry on transient/rate-limit errors; 4xx (except 429) are non-retryable
+    const isRetryable =
+      errorCode === null ||
+      errorCode === 429 ||
+      (errorCode >= 500 && errorCode <= 599);
+
+    if (!isRetryable || attempt === maxAttempts) {
+      return { ...lastResult, attempts: attempt };
+    }
+
+    // Exponential backoff: 1s, 2s, 4s … capped at 10s + up to 30% jitter
+    const base = Math.min(1000 * Math.pow(2, attempt - 1), 10000);
+    const jitter = Math.floor(Math.random() * base * 0.3);
+    console.warn(
+      `[meli] Retrying ${itemId} (attempt ${attempt}/${maxAttempts}) after ${base + jitter}ms (HTTP ${errorCode ?? 'timeout'})`
+    );
+    await sleep(base + jitter);
+  }
+  return { ...lastResult, attempts: maxAttempts };
+}
+
+/**
+ * Alternative route 1: GET /items/{id}?attributes=...
+ * Uses a reduced attribute set which sometimes bypasses stricter access controls.
+ */
+export async function fetchItemAttributes(itemId: string): Promise<ItemFetchResult> {
+  const attrs =
+    'id,title,price,currency_id,available_quantity,sold_quantity,thumbnail,status,permalink';
+  try {
+    const resp = await axios.get(`${MELI_API}/items/${itemId}`, {
+      headers: authHeaders(),
+      timeout: REQUEST_TIMEOUT_MS,
+      params: { attributes: attrs },
+    });
+    return { ok: true, data: resp.data };
+  } catch (err: unknown) {
+    const { code, message } = classifyAxiosError(err);
+    return { ok: false, errorCode: code, errorMessage: message };
+  }
+}
+
+/**
+ * Alternative route 2: GET /items?ids={id} (batch endpoint)
+ * The batch endpoint has different access-control policies than the single-item endpoint.
+ */
+export async function fetchItemBatch(itemId: string): Promise<ItemFetchResult> {
+  try {
+    const resp = await axios.get(`${MELI_API}/items`, {
+      headers: authHeaders(),
+      timeout: REQUEST_TIMEOUT_MS,
+      params: { ids: itemId },
+    });
+    // Response: Array<{ code: number; body: MeliItem | { message: string } }>
+    const results = resp.data as Array<{ code: number; body: unknown }>;
+    const hit = results.find(r => r.code === 200);
+    if (hit) return { ok: true, data: hit.body as MeliItem };
+    const first = results[0];
+    return {
+      ok: false,
+      errorCode: first?.code ?? null,
+      errorMessage: `Batch endpoint returned code ${first?.code ?? 'unknown'}`,
+    };
+  } catch (err: unknown) {
+    const { code, message } = classifyAxiosError(err);
+    return { ok: false, errorCode: code, errorMessage: message };
+  }
+}
+
+/**
+ * Alternative route 3: GET /sites/MLB/search?item_id={id}
+ * Search endpoint can expose item data when the direct /items endpoint is blocked.
+ */
+export async function fetchItemSearch(itemId: string): Promise<ItemFetchResult> {
+  try {
+    const resp = await axios.get(`${MELI_API}/sites/MLB/search`, {
+      headers: authHeaders(),
+      timeout: REQUEST_TIMEOUT_MS,
+      params: { item_id: itemId },
+    });
+    const results: MeliItem[] = resp.data?.results ?? [];
+    const found = results.find(r => r.id === itemId) ?? results[0];
+    if (found) return { ok: true, data: found };
+    return { ok: false, errorCode: 404, errorMessage: 'Item not found in search results' };
+  } catch (err: unknown) {
+    const { code, message } = classifyAxiosError(err);
+    return { ok: false, errorCode: code, errorMessage: message };
+  }
+}
+
+/**
+ * Tries alternative API routes (in order) when the primary /items/{id} endpoint returns 403.
+ * Order:
+ *   1. /items/{id}?attributes=... (reduced payload)
+ *   2. /items?ids={id}           (batch endpoint)
+ *   3. /sites/MLB/search?item_id={id} (search)
+ * Returns the first successful result along with the source identifier, or failure.
+ */
+export async function resolveItemViaAlternativeRoutes(
+  itemId: string
+): Promise<AlternativeRoutesResult> {
+  const routes: Array<{
+    source: AlternativeSource;
+    fn: () => Promise<ItemFetchResult>;
+  }> = [
+    { source: 'api_attributes', fn: () => fetchItemAttributes(itemId) },
+    { source: 'api_batch',      fn: () => fetchItemBatch(itemId) },
+    { source: 'api_search',     fn: () => fetchItemSearch(itemId) },
+  ];
+
+  let lastCode: number | null = 403;
+  let lastMsg = 'Blocked on all alternative API routes';
+
+  for (const { source, fn } of routes) {
+    const result = await fn();
+    if (result.ok) {
+      console.info(`[meli] ${itemId} resolved via alternative route: ${source}`);
+      return { ok: true, data: result.data, source };
+    }
+    lastCode = result.errorCode;
+    lastMsg = result.errorMessage;
+    console.warn(
+      `[meli] Alternative route ${source} failed for ${itemId}: HTTP ${result.errorCode ?? 'unknown'} – ${result.errorMessage}`
+    );
+  }
+
+  return { ok: false, errorCode: lastCode, errorMessage: lastMsg };
 }
 
 /**

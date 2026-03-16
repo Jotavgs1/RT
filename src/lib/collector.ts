@@ -1,14 +1,21 @@
 import { getDb, TrackedItem } from './db';
-import { fetchItem, fetchItemFallback, parseSoldQty } from './meli';
+import { fetchItemWithRetry, fetchItemFallback, resolveItemViaAlternativeRoutes, parseSoldQty, AlternativeSource } from './meli';
 import { recomputeDailyMetrics } from './estimator';
+import { ALTERNATIVE_API_SOURCES } from './constants';
 
 export type ItemCollectStatus = 'ok' | 'blocked' | 'removed' | 'auth_error' | 'failed';
+
+export type CollectSource = 'api' | AlternativeSource | 'fallback' | 'none';
+
+export { ALTERNATIVE_API_SOURCES };
 
 export interface CollectItemResult {
   itemId: string;
   status: ItemCollectStatus;
   reason?: string;
-  sourceUsed: 'api' | 'fallback' | 'none';
+  sourceUsed: CollectSource;
+  attempts?: number;
+  lastHttpStatus?: number | null;
 }
 
 export interface CollectProjectResult {
@@ -18,8 +25,18 @@ export interface CollectProjectResult {
   items: CollectItemResult[];
 }
 
+/** Persists a transient/permanent error for an item (no data snapshot) */
+function updateItemError(itemId: string, errorCode: number | null, errorMessage: string): void {
+  getDb()
+    .prepare(
+      'UPDATE tracked_items SET last_error_code = ?, last_error_message = ?, source_used = NULL WHERE id = ?'
+    )
+    .run(errorCode ?? null, errorMessage, itemId);
+}
+
 export async function collectItem(itemId: string): Promise<CollectItemResult> {
-  const fetchResult = await fetchItem(itemId);
+  // Step 1: Try primary endpoint with retry (backoff for 429/5xx/timeout)
+  const fetchResult = await fetchItemWithRetry(itemId, 3);
 
   if (fetchResult.ok) {
     const item = fetchResult.data;
@@ -41,27 +58,26 @@ export async function collectItem(itemId: string): Promise<CollectItemResult> {
     db.prepare(`
       UPDATE tracked_items
       SET title = ?, thumbnail = ?, status = ?, blocked = 0,
-          last_error_code = NULL, last_error_message = NULL
+          last_error_code = NULL, last_error_message = NULL,
+          source_used = 'api'
       WHERE id = ?
     `).run(item.title, item.thumbnail, item.status, itemId);
 
-    return { itemId, status: 'ok', sourceUsed: 'api' };
+    return { itemId, status: 'ok', sourceUsed: 'api', attempts: fetchResult.attempts };
   }
 
   // API call failed — classify by HTTP status
   const { errorCode, errorMessage } = fetchResult;
 
   if (errorCode === 401) {
-    getDb()
-      .prepare(
-        'UPDATE tracked_items SET last_error_code = ?, last_error_message = ? WHERE id = ?'
-      )
-      .run(401, 'Token inválido ou expirado (401)', itemId);
+    updateItemError(itemId, 401, 'Token inválido ou expirado (401)');
     return {
       itemId,
       status: 'auth_error',
       reason: 'Token inválido ou expirado (401)',
       sourceUsed: 'none',
+      attempts: fetchResult.attempts,
+      lastHttpStatus: 401,
     };
   }
 
@@ -70,15 +86,58 @@ export async function collectItem(itemId: string): Promise<CollectItemResult> {
       errorCode === 410 ? 'Item removido permanentemente (410)' : 'Item não encontrado (404)';
     getDb()
       .prepare(
-        "UPDATE tracked_items SET status = 'closed', last_error_code = ?, last_error_message = ? WHERE id = ?"
+        "UPDATE tracked_items SET status = 'closed', last_error_code = ?, last_error_message = ?, source_used = NULL WHERE id = ?"
       )
       .run(errorCode, reason, itemId);
-    return { itemId, status: 'removed', reason, sourceUsed: 'none' };
+    return {
+      itemId,
+      status: 'removed',
+      reason,
+      sourceUsed: 'none',
+      attempts: fetchResult.attempts,
+      lastHttpStatus: errorCode,
+    };
   }
 
   if (errorCode === 403) {
     const db = getDb();
-    // Busca URL cadastrada para usar como permalink no scraping
+    // Step 2: Try alternative API routes before falling back to scraping
+    const altResult = await resolveItemViaAlternativeRoutes(itemId);
+
+    if (altResult.ok) {
+      const item = altResult.data;
+      const { value: soldQty, rawStr: soldQtyRaw } = parseSoldQty(item.sold_quantity);
+
+      db.prepare(`
+        INSERT INTO item_snapshots (item_id, captured_at, available_qty, sold_qty, sold_qty_raw, price, status)
+        VALUES (?, datetime('now'), ?, ?, ?, ?, ?)
+      `).run(
+        itemId,
+        item.available_quantity ?? null,
+        soldQty,
+        soldQtyRaw,
+        item.price ?? null,
+        item.status ?? null
+      );
+
+      db.prepare(`
+        UPDATE tracked_items
+        SET title = COALESCE(?, title), thumbnail = COALESCE(?, thumbnail),
+            blocked = 0, last_error_code = NULL, last_error_message = NULL,
+            source_used = ?
+        WHERE id = ?
+      `).run(item.title ?? null, item.thumbnail ?? null, altResult.source, itemId);
+
+      return {
+        itemId,
+        status: 'ok',
+        sourceUsed: altResult.source,
+        attempts: fetchResult.attempts,
+        lastHttpStatus: 403,
+      };
+    }
+
+    // Step 3: All API routes failed — try scraping as last resort only
     const tracked = db
       .prepare('SELECT * FROM tracked_items WHERE id = ?')
       .get(itemId) as TrackedItem | undefined;
@@ -96,39 +155,47 @@ export async function collectItem(itemId: string): Promise<CollectItemResult> {
         SET title = COALESCE(?, title),
             blocked = 1,
             last_error_code = 403,
-            last_error_message = 'Acesso negado pela API (403) – dados obtidos via scraping'
+            last_error_message = 'Acesso negado pela API (403) – todas as rotas API falharam; dados parciais via scraping',
+            source_used = 'fallback'
         WHERE id = ?
       `).run(fallbackData.title ?? null, itemId);
 
       return {
         itemId,
         status: 'blocked',
-        reason: 'Acesso negado (403) – snapshot parcial obtido via scraping',
+        reason: 'Acesso negado (403) – todas as rotas API falharam; snapshot parcial via scraping (último recurso)',
         sourceUsed: 'fallback',
+        attempts: fetchResult.attempts,
+        lastHttpStatus: 403,
       };
     }
 
-    // Fallback também falhou
+    // Everything failed
     db.prepare(
-      'UPDATE tracked_items SET blocked = 1, last_error_code = 403, last_error_message = ? WHERE id = ?'
+      'UPDATE tracked_items SET blocked = 1, last_error_code = 403, last_error_message = ?, source_used = NULL WHERE id = ?'
     ).run('Acesso negado pela API (403) – sem dados disponíveis', itemId);
 
     return {
       itemId,
       status: 'blocked',
-      reason: 'Acesso negado (403) – fallback também falhou',
+      reason: 'Acesso negado (403) – todas as rotas falharam',
       sourceUsed: 'none',
+      attempts: fetchResult.attempts,
+      lastHttpStatus: 403,
     };
   }
 
-  // 5xx / timeout / erro de rede — falha temporária
-  getDb()
-    .prepare(
-      'UPDATE tracked_items SET last_error_code = ?, last_error_message = ? WHERE id = ?'
-    )
-    .run(errorCode ?? null, errorMessage, itemId);
+  // 5xx / timeout / network error — transient failure (retries already exhausted)
+  updateItemError(itemId, errorCode, errorMessage);
 
-  return { itemId, status: 'failed', reason: errorMessage, sourceUsed: 'none' };
+  return {
+    itemId,
+    status: 'failed',
+    reason: errorMessage,
+    sourceUsed: 'none',
+    attempts: fetchResult.attempts,
+    lastHttpStatus: errorCode,
+  };
 }
 
 export async function collectProject(projectId: number): Promise<CollectProjectResult> {
