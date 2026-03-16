@@ -37,6 +37,7 @@ function initSchema(db: Database.Database) {
       blocked INTEGER NOT NULL DEFAULT 0,
       last_error_code INTEGER,
       last_error_message TEXT,
+      source_used TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (project_id) REFERENCES projects(id)
     );
@@ -93,6 +94,9 @@ function migrateTrackedItems(db: Database.Database) {
   if (!cols.includes('last_error_message')) {
     db.exec('ALTER TABLE tracked_items ADD COLUMN last_error_message TEXT');
   }
+  if (!cols.includes('source_used')) {
+    db.exec('ALTER TABLE tracked_items ADD COLUMN source_used TEXT');
+  }
 }
 
 export interface Project {
@@ -113,6 +117,7 @@ export interface TrackedItem {
   blocked: number;
   last_error_code: number | null;
   last_error_message: string | null;
+  source_used: string | null;
   created_at: string;
 }
 

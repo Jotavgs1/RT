@@ -1,12 +1,13 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { ALTERNATIVE_API_SOURCES } from '@/lib/constants';
 
 interface Project { id: number; name: string; created_at: string }
 interface DailyMetric { date: string; units_sold_est_total: number; items_sold_count: number; revenue_est_total: number; avg_ticket_est: number }
 interface DailyItemMetric { item_id: string; date: string; units_sold_est: number; revenue_est: number; avg_price: number; reliability: string; title: string; thumbnail: string; url: string }
 interface DayDetail { daily: DailyMetric | null; items: DailyItemMetric[] }
-interface TrackedItem { id: string; project_id: number; url: string; title: string | null; thumbnail: string | null; status: string; unresolved: number; unresolved_message: string | null; blocked: number; last_error_code: number | null; last_error_message: string | null }
+interface TrackedItem { id: string; project_id: number; url: string; title: string | null; thumbnail: string | null; status: string; unresolved: number; unresolved_message: string | null; blocked: number; last_error_code: number | null; last_error_message: string | null; source_used: string | null }
 
 function formatBRL(v: number) {
   return v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
@@ -115,10 +116,13 @@ export default function HomePage() {
     try {
       const r = await fetch(`/api/projects/${selectedProject.id}/collect`, { method: 'POST' });
       const data = await r.json();
-      const blocked = data.items?.filter((i: { status: string }) => i.status === 'blocked').length ?? 0;
+      const items: Array<{ status: string; sourceUsed: string }> = data.items ?? [];
+      const blocked = items.filter(i => i.status === 'blocked').length;
+      const altRoutes = items.filter(i => i.status === 'ok' && (ALTERNATIVE_API_SOURCES as readonly string[]).includes(i.sourceUsed)).length;
       const failedMsg = data.failed > 0 ? ` | ❌ ${data.failed} falhou(aram)` : '';
       const blockedMsg = blocked > 0 ? ` | 🚫 ${blocked} bloqueado(s)` : '';
-      setCollectMsg(`✅ ${data.collected} item(s) coletado(s)${blockedMsg}${failedMsg}`);
+      const altMsg = altRoutes > 0 ? ` | 🔀 ${altRoutes} via rota alternativa` : '';
+      setCollectMsg(`✅ ${data.collected} item(s) coletado(s)${altMsg}${blockedMsg}${failedMsg}`);
       await loadMonthly();
       if (selectedDate) await loadDay(selectedDate);
     } catch {
@@ -268,10 +272,20 @@ export default function HomePage() {
                       <p className="text-sm font-medium truncate">{item.title || item.id}</p>
                       <p className="text-xs text-gray-400">{item.id} · {item.status}</p>
                       {item.unresolved === 1 && <p className="text-xs text-orange-500">⚠️ Não resolvido: {item.unresolved_message}</p>}
-                      {item.blocked === 1 && (
+                      {item.blocked === 1 && item.source_used === 'fallback' && (
+                        <p className="text-xs text-orange-500">
+                          ⚠️ Bloqueado pela API – todas as rotas API falharam; dados parciais via scraping (último recurso).
+                        </p>
+                      )}
+                      {item.blocked === 1 && item.source_used !== 'fallback' && (
                         <p className="text-xs text-red-500">
-                          🚫 Bloqueado (acesso negado pela API) – considere trocar este anúncio.
+                          🚫 Bloqueado – sem dados disponíveis (403 em todas as rotas API e scraping).
                           {item.last_error_message ? ` ${item.last_error_message}` : ''}
+                        </p>
+                      )}
+                      {item.blocked === 0 && item.source_used && item.source_used !== 'api' && (
+                        <p className="text-xs text-blue-500">
+                          🔀 Dados obtidos via rota alternativa ({item.source_used})
                         </p>
                       )}
                     </div>
