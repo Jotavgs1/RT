@@ -17,15 +17,31 @@ export async function GET() {
   });
 }
 
+function sanitizeEnvValue(value: string): string {
+  // Remove newlines and null bytes to prevent env file injection
+  return value.replace(/[\r\n\0]/g, '');
+}
+
 export async function POST(req: NextRequest) {
   const body = await req.json();
   const { access_token, client_id, client_secret, collect_interval } = body as Record<string, string>;
 
   const lines: string[] = [];
-  if (access_token) lines.push(`MELI_ACCESS_TOKEN=${access_token}`);
-  if (client_id) lines.push(`MELI_CLIENT_ID=${client_id}`);
-  if (client_secret) lines.push(`MELI_CLIENT_SECRET=${client_secret}`);
-  if (collect_interval) lines.push(`COLLECT_INTERVAL_MINUTES=${collect_interval}`);
+  if (access_token && typeof access_token === 'string') {
+    lines.push(`MELI_ACCESS_TOKEN=${sanitizeEnvValue(access_token)}`);
+  }
+  if (client_id && typeof client_id === 'string') {
+    lines.push(`MELI_CLIENT_ID=${sanitizeEnvValue(client_id)}`);
+  }
+  if (client_secret && typeof client_secret === 'string') {
+    lines.push(`MELI_CLIENT_SECRET=${sanitizeEnvValue(client_secret)}`);
+  }
+  if (collect_interval && typeof collect_interval === 'string') {
+    const interval = parseInt(collect_interval, 10);
+    if (!isNaN(interval) && interval >= 1 && interval <= 1440) {
+      lines.push(`COLLECT_INTERVAL_MINUTES=${interval}`);
+    }
+  }
   lines.push('ENABLE_SCRAPING=false');
 
   fs.writeFileSync(ENV_PATH, lines.join('\n') + '\n', 'utf8');

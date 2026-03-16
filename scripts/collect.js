@@ -35,9 +35,14 @@ async function main() {
     });
   });
   
-  req.on('error', () => {
-    console.log('[Collect] ⚠️  Server not running. Start the app first with: npm run dev');
-    console.log('[Collect] Then run: npm run collect');
+  req.on('error', (err) => {
+    const isConnRefused = err && typeof err === 'object' && 'code' in err && err.code === 'ECONNREFUSED';
+    if (isConnRefused) {
+      console.log('[Collect] ⚠️  Server not running. Start the app first with: npm run dev');
+      console.log('[Collect] Then run: npm run collect');
+    } else {
+      console.error('[Collect] Error:', err.message);
+    }
   });
   
   req.end();

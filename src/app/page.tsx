@@ -260,7 +260,7 @@ export default function HomePage() {
               <div className="divide-y">
                 {trackedItems.map(item => (
                   <div key={item.id} className="py-2 flex items-center gap-3">
-                    {item.thumbnail && <img src={item.thumbnail} alt="" className="w-10 h-10 object-contain rounded" />}
+                    {item.thumbnail && <img src={item.thumbnail} alt={item.title || item.id} className="w-10 h-10 object-contain rounded" />}
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-medium truncate">{item.title || item.id}</p>
                       <p className="text-xs text-gray-400">{item.id} · {item.status}</p>
@@ -342,7 +342,7 @@ export default function HomePage() {
 
               <div className="space-y-4">
                 <h3 className="font-semibold text-gray-700">
-                  {selectedDate ? `📅 ${new Date(selectedDate + 'T12:00:00').toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' })}` : 'Selecione um dia'}
+                  {selectedDate ? `📅 ${new Date(selectedDate + 'T12:00:00Z').toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' })}` : 'Selecione um dia'}
                 </h3>
                 {dayDetail?.daily ? (
                   <div className="grid grid-cols-2 gap-3">
@@ -394,7 +394,7 @@ export default function HomePage() {
                         <tr key={item.item_id} className="hover:bg-gray-50">
                           <td className="py-2 pr-4">
                             <div className="flex items-center gap-2">
-                              {item.thumbnail && <img src={item.thumbnail} alt="" className="w-10 h-10 object-contain rounded border" />}
+                              {item.thumbnail && <img src={item.thumbnail} alt={item.title || item.item_id} className="w-10 h-10 object-contain rounded border" />}
                               <div>
                                 <a href={item.url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline font-medium line-clamp-2 max-w-xs">
                                   {item.title || item.item_id}

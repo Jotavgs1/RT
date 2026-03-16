@@ -1,6 +1,7 @@
 import axios from 'axios';
 
 const MELI_API = 'https://api.mercadolibre.com';
+const REQUEST_TIMEOUT_MS = 10000;
 
 function getToken(): string {
   return process.env.MELI_ACCESS_TOKEN || '';
@@ -50,7 +51,7 @@ export async function fetchItem(itemId: string): Promise<MeliItem | null> {
   try {
     const resp = await axios.get(`${MELI_API}/items/${itemId}`, {
       headers: authHeaders(),
-      timeout: 10000,
+      timeout: REQUEST_TIMEOUT_MS,
     });
     return resp.data;
   } catch (err) {
@@ -66,7 +67,7 @@ export async function resolveProductToItems(productId: string): Promise<{
   try {
     const resp = await axios.get(`${MELI_API}/products/${productId}`, {
       headers: authHeaders(),
-      timeout: 10000,
+      timeout: REQUEST_TIMEOUT_MS,
     });
     const product: MeliProduct = resp.data;
     const items: string[] = [];
