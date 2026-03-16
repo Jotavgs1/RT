@@ -18,8 +18,9 @@ export async function GET() {
 }
 
 function sanitizeEnvValue(value: string): string {
-  // Remove newlines and null bytes to prevent env file injection
-  return value.replace(/[\r\n\0]/g, '');
+  // Remove characters that could break or inject into .env files
+  // Remove newlines, null bytes, and comment delimiter '#'
+  return value.replace(/[\r\n\0#]/g, '');
 }
 
 export async function POST(req: NextRequest) {
@@ -38,7 +39,7 @@ export async function POST(req: NextRequest) {
   }
   if (collect_interval && typeof collect_interval === 'string') {
     const interval = parseInt(collect_interval, 10);
-    if (!isNaN(interval) && interval >= 1 && interval <= 1440) {
+    if (!isNaN(interval) && interval >= 15 && interval <= 1440) {
       lines.push(`COLLECT_INTERVAL_MINUTES=${interval}`);
     }
   }
