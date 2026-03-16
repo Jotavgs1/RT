@@ -34,6 +34,9 @@ function initSchema(db: Database.Database) {
       status TEXT DEFAULT 'active',
       unresolved INTEGER DEFAULT 0,
       unresolved_message TEXT,
+      blocked INTEGER NOT NULL DEFAULT 0,
+      last_error_code INTEGER,
+      last_error_message TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (project_id) REFERENCES projects(id)
     );
@@ -71,6 +74,25 @@ function initSchema(db: Database.Database) {
       PRIMARY KEY (project_id, date)
     );
   `);
+
+  // Migração: adiciona colunas novas em bases de dados existentes
+  migrateTrackedItems(db);
+}
+
+function migrateTrackedItems(db: Database.Database) {
+  const cols = (
+    db.prepare('PRAGMA table_info(tracked_items)').all() as { name: string }[]
+  ).map(c => c.name);
+
+  if (!cols.includes('blocked')) {
+    db.exec('ALTER TABLE tracked_items ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!cols.includes('last_error_code')) {
+    db.exec('ALTER TABLE tracked_items ADD COLUMN last_error_code INTEGER');
+  }
+  if (!cols.includes('last_error_message')) {
+    db.exec('ALTER TABLE tracked_items ADD COLUMN last_error_message TEXT');
+  }
 }
 
 export interface Project {
@@ -88,6 +110,9 @@ export interface TrackedItem {
   status: string;
   unresolved: number;
   unresolved_message: string | null;
+  blocked: number;
+  last_error_code: number | null;
+  last_error_message: string | null;
   created_at: string;
 }
 

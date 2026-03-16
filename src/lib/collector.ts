@@ -1,54 +1,159 @@
 import { getDb, TrackedItem } from './db';
-import { fetchItem, parseSoldQty } from './meli';
+import { fetchItem, fetchItemFallback, parseSoldQty } from './meli';
 import { recomputeDailyMetrics } from './estimator';
 
-export async function collectItem(itemId: string): Promise<{ ok: boolean; error?: string }> {
-  const item = await fetchItem(itemId);
-  if (!item) return { ok: false, error: `Erro ao buscar item ${itemId}` };
+export type ItemCollectStatus = 'ok' | 'blocked' | 'removed' | 'auth_error' | 'failed';
 
-  const db = getDb();
-  const { value: soldQty, rawStr: soldQtyRaw } = parseSoldQty(item.sold_quantity);
-
-  db.prepare(`
-    INSERT INTO item_snapshots (item_id, captured_at, available_qty, sold_qty, sold_qty_raw, price, status)
-    VALUES (?, datetime('now'), ?, ?, ?, ?, ?)
-  `).run(
-    itemId,
-    item.available_quantity ?? null,
-    soldQty,
-    soldQtyRaw,
-    item.price ?? null,
-    item.status ?? null
-  );
-
-  db.prepare(`
-    UPDATE tracked_items SET title = ?, thumbnail = ?, status = ? WHERE id = ?
-  `).run(item.title, item.thumbnail, item.status, itemId);
-
-  return { ok: true };
+export interface CollectItemResult {
+  itemId: string;
+  status: ItemCollectStatus;
+  reason?: string;
+  sourceUsed: 'api' | 'fallback' | 'none';
 }
 
-export async function collectProject(projectId: number): Promise<{
-  success: number;
-  errors: string[];
-}> {
+export interface CollectProjectResult {
+  collected: number;
+  skipped: number;
+  failed: number;
+  items: CollectItemResult[];
+}
+
+export async function collectItem(itemId: string): Promise<CollectItemResult> {
+  const fetchResult = await fetchItem(itemId);
+
+  if (fetchResult.ok) {
+    const item = fetchResult.data;
+    const db = getDb();
+    const { value: soldQty, rawStr: soldQtyRaw } = parseSoldQty(item.sold_quantity);
+
+    db.prepare(`
+      INSERT INTO item_snapshots (item_id, captured_at, available_qty, sold_qty, sold_qty_raw, price, status)
+      VALUES (?, datetime('now'), ?, ?, ?, ?, ?)
+    `).run(
+      itemId,
+      item.available_quantity ?? null,
+      soldQty,
+      soldQtyRaw,
+      item.price ?? null,
+      item.status ?? null
+    );
+
+    db.prepare(`
+      UPDATE tracked_items
+      SET title = ?, thumbnail = ?, status = ?, blocked = 0,
+          last_error_code = NULL, last_error_message = NULL
+      WHERE id = ?
+    `).run(item.title, item.thumbnail, item.status, itemId);
+
+    return { itemId, status: 'ok', sourceUsed: 'api' };
+  }
+
+  // API call failed — classify by HTTP status
+  const { errorCode, errorMessage } = fetchResult;
+
+  if (errorCode === 401) {
+    getDb()
+      .prepare(
+        'UPDATE tracked_items SET last_error_code = ?, last_error_message = ? WHERE id = ?'
+      )
+      .run(401, 'Token inválido ou expirado (401)', itemId);
+    return {
+      itemId,
+      status: 'auth_error',
+      reason: 'Token inválido ou expirado (401)',
+      sourceUsed: 'none',
+    };
+  }
+
+  if (errorCode === 404 || errorCode === 410) {
+    const reason =
+      errorCode === 410 ? 'Item removido permanentemente (410)' : 'Item não encontrado (404)';
+    getDb()
+      .prepare(
+        "UPDATE tracked_items SET status = 'closed', last_error_code = ?, last_error_message = ? WHERE id = ?"
+      )
+      .run(errorCode, reason, itemId);
+    return { itemId, status: 'removed', reason, sourceUsed: 'none' };
+  }
+
+  if (errorCode === 403) {
+    const db = getDb();
+    // Busca URL cadastrada para usar como permalink no scraping
+    const tracked = db
+      .prepare('SELECT * FROM tracked_items WHERE id = ?')
+      .get(itemId) as TrackedItem | undefined;
+
+    const fallbackData = await fetchItemFallback(itemId, tracked?.url ?? null);
+
+    if (fallbackData && (fallbackData.title || fallbackData.price != null)) {
+      db.prepare(`
+        INSERT INTO item_snapshots (item_id, captured_at, available_qty, sold_qty, sold_qty_raw, price, status)
+        VALUES (?, datetime('now'), NULL, NULL, NULL, ?, 'blocked')
+      `).run(itemId, fallbackData.price ?? null);
+
+      db.prepare(`
+        UPDATE tracked_items
+        SET title = COALESCE(?, title),
+            blocked = 1,
+            last_error_code = 403,
+            last_error_message = 'Acesso negado pela API (403) – dados obtidos via scraping'
+        WHERE id = ?
+      `).run(fallbackData.title ?? null, itemId);
+
+      return {
+        itemId,
+        status: 'blocked',
+        reason: 'Acesso negado (403) – snapshot parcial obtido via scraping',
+        sourceUsed: 'fallback',
+      };
+    }
+
+    // Fallback também falhou
+    db.prepare(
+      'UPDATE tracked_items SET blocked = 1, last_error_code = 403, last_error_message = ? WHERE id = ?'
+    ).run('Acesso negado pela API (403) – sem dados disponíveis', itemId);
+
+    return {
+      itemId,
+      status: 'blocked',
+      reason: 'Acesso negado (403) – fallback também falhou',
+      sourceUsed: 'none',
+    };
+  }
+
+  // 5xx / timeout / erro de rede — falha temporária
+  getDb()
+    .prepare(
+      'UPDATE tracked_items SET last_error_code = ?, last_error_message = ? WHERE id = ?'
+    )
+    .run(errorCode ?? null, errorMessage, itemId);
+
+  return { itemId, status: 'failed', reason: errorMessage, sourceUsed: 'none' };
+}
+
+export async function collectProject(projectId: number): Promise<CollectProjectResult> {
   const db = getDb();
   const items = db
     .prepare('SELECT * FROM tracked_items WHERE project_id = ? AND status != ? AND unresolved = 0')
     .all(projectId, 'closed') as TrackedItem[];
 
-  const errors: string[] = [];
-  let success = 0;
+  const results: CollectItemResult[] = [];
+  let collected = 0;
+  let skipped = 0;
+  let failed = 0;
+
   for (const item of items) {
     const result = await collectItem(item.id);
-    if (result.ok) success++;
-    else if (result.error) errors.push(result.error);
+    results.push(result);
+    if (result.status === 'ok') collected++;
+    else if (result.status === 'removed') skipped++;
+    else failed++;
   }
 
   const today = new Date().toISOString().slice(0, 10);
   recomputeDailyMetrics(projectId, today);
 
-  return { success, errors };
+  return { collected, skipped, failed, items: results };
 }
 
 export async function collectAll(): Promise<{
@@ -63,8 +168,12 @@ export async function collectAll(): Promise<{
 
   for (const p of projects) {
     const result = await collectProject(p.id);
-    totalSuccess += result.success;
-    allErrors.push(...result.errors);
+    totalSuccess += result.collected;
+    allErrors.push(
+      ...result.items
+        .filter(i => i.status !== 'ok' && i.status !== 'removed')
+        .map(i => `${i.itemId}: ${i.reason ?? i.status}`)
+    );
   }
 
   return {
