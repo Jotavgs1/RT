@@ -3,9 +3,10 @@ import { collectProject } from '@/lib/collector';
 
 export async function POST(
   _req: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
-  const projectId = parseInt(params.id, 10);
+  const { id } = await params;
+  const projectId = parseInt(id, 10);
   const result = await collectProject(projectId);
   return NextResponse.json(result);
 }

@@ -3,10 +3,11 @@ import { getDb } from '@/lib/db';
 
 export async function DELETE(
   _req: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   const db = getDb();
-  const id = parseInt(params.id, 10);
+  const { id: idStr } = await params;
+  const id = parseInt(idStr, 10);
   db.prepare('DELETE FROM daily_item_metrics WHERE item_id IN (SELECT id FROM tracked_items WHERE project_id = ?)').run(id);
   db.prepare('DELETE FROM item_snapshots WHERE item_id IN (SELECT id FROM tracked_items WHERE project_id = ?)').run(id);
   db.prepare('DELETE FROM daily_metrics WHERE project_id = ?').run(id);

@@ -3,11 +3,11 @@ import { getDb, DailyMetric, DailyItemMetric, TrackedItem } from '@/lib/db';
 
 export async function GET(
   _req: NextRequest,
-  { params }: { params: { id: string; date: string } }
+  { params }: { params: Promise<{ id: string; date: string }> }
 ) {
   const db = getDb();
-  const projectId = parseInt(params.id, 10);
-  const date = params.date;
+  const { id, date } = await params;
+  const projectId = parseInt(id, 10);
 
   const daily = db
     .prepare('SELECT * FROM daily_metrics WHERE project_id = ? AND date = ?')

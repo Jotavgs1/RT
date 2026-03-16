@@ -10,22 +10,24 @@ import {
 
 export async function GET(
   _req: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   const db = getDb();
+  const { id } = await params;
   const items = db
     .prepare('SELECT * FROM tracked_items WHERE project_id = ? ORDER BY created_at DESC')
-    .all(parseInt(params.id, 10)) as TrackedItem[];
+    .all(parseInt(id, 10)) as TrackedItem[];
   return NextResponse.json(items);
 }
 
 export async function POST(
   req: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   const body = await req.json();
   const { url } = body as { url: string };
-  const projectId = parseInt(params.id, 10);
+  const { id } = await params;
+  const projectId = parseInt(id, 10);
 
   if (!url || typeof url !== 'string') {
     return NextResponse.json({ error: 'URL inválida' }, { status: 400 });

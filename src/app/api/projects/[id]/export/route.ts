@@ -3,13 +3,14 @@ import { getDb } from '@/lib/db';
 
 export async function GET(
   req: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   const { searchParams } = new URL(req.url);
   const from = searchParams.get('from') || '';
   const to = searchParams.get('to') || '';
   const mode = searchParams.get('mode') || 'daily';
-  const projectId = parseInt(params.id, 10);
+  const { id } = await params;
+  const projectId = parseInt(id, 10);
 
   const db = getDb();
   let csv = '';
