@@ -6,7 +6,7 @@ interface Project { id: number; name: string; created_at: string }
 interface DailyMetric { date: string; units_sold_est_total: number; items_sold_count: number; revenue_est_total: number; avg_ticket_est: number }
 interface DailyItemMetric { item_id: string; date: string; units_sold_est: number; revenue_est: number; avg_price: number; reliability: string; title: string; thumbnail: string; url: string }
 interface DayDetail { daily: DailyMetric | null; items: DailyItemMetric[] }
-interface TrackedItem { id: string; project_id: number; url: string; title: string | null; thumbnail: string | null; status: string; unresolved: number; unresolved_message: string | null }
+interface TrackedItem { id: string; project_id: number; url: string; title: string | null; thumbnail: string | null; status: string; unresolved: number; unresolved_message: string | null; blocked: number; last_error_code: number | null; last_error_message: string | null }
 
 function formatBRL(v: number) {
   return v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
@@ -115,7 +115,10 @@ export default function HomePage() {
     try {
       const r = await fetch(`/api/projects/${selectedProject.id}/collect`, { method: 'POST' });
       const data = await r.json();
-      setCollectMsg(`✅ ${data.success} item(s) coletado(s)${data.errors?.length ? ` | ⚠️ ${data.errors.length} erro(s)` : ''}`);
+      const blocked = data.items?.filter((i: { status: string }) => i.status === 'blocked').length ?? 0;
+      const failedMsg = data.failed > 0 ? ` | ❌ ${data.failed} falhou(aram)` : '';
+      const blockedMsg = blocked > 0 ? ` | 🚫 ${blocked} bloqueado(s)` : '';
+      setCollectMsg(`✅ ${data.collected} item(s) coletado(s)${blockedMsg}${failedMsg}`);
       await loadMonthly();
       if (selectedDate) await loadDay(selectedDate);
     } catch {
@@ -265,6 +268,12 @@ export default function HomePage() {
                       <p className="text-sm font-medium truncate">{item.title || item.id}</p>
                       <p className="text-xs text-gray-400">{item.id} · {item.status}</p>
                       {item.unresolved === 1 && <p className="text-xs text-orange-500">⚠️ Não resolvido: {item.unresolved_message}</p>}
+                      {item.blocked === 1 && (
+                        <p className="text-xs text-red-500">
+                          🚫 Bloqueado (acesso negado pela API) – considere trocar este anúncio.
+                          {item.last_error_message ? ` ${item.last_error_message}` : ''}
+                        </p>
+                      )}
                     </div>
                     <button onClick={() => deleteItem(item.id)} className="text-red-400 hover:text-red-600 text-sm px-2">🗑</button>
                   </div>

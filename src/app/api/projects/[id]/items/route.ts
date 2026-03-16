@@ -78,7 +78,8 @@ async function upsertTrackedItem(
   const existing = db.prepare('SELECT * FROM tracked_items WHERE id = ?').get(itemId) as TrackedItem | undefined;
   if (existing) return existing;
 
-  const meliItem = await fetchItem(itemId);
+  const fetchResult = await fetchItem(itemId);
+  const meliItem = fetchResult.ok ? fetchResult.data : null;
 
   db.prepare(`
     INSERT OR IGNORE INTO tracked_items (id, project_id, url, title, thumbnail, status, unresolved, created_at)
